@@ -23,6 +23,17 @@ export const commandData: RESTPostAPIChatInputApplicationCommandsJSONBody[] = [
     .setDescription("Show the current queue.")
     .toJSON(),
   new SlashCommandBuilder()
+    .setName("remove")
+    .setDescription("Remove a queued track by its queue number.")
+    .addIntegerOption((option) =>
+      option
+        .setName("index")
+        .setDescription("Queue number from /queue")
+        .setMinValue(1)
+        .setRequired(true)
+    )
+    .toJSON(),
+  new SlashCommandBuilder()
     .setName("jump")
     .setDescription("Jump to a numbered queue item.")
     .addIntegerOption((option) =>
