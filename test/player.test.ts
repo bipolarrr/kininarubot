@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   GuildMusicPlayer,
   applyRepeatModeOnFinish,
+  buildFfmpegArgs,
   jumpQueue,
-  previousQueueTransition
+  previousQueueTransition,
+  removeFromQueue
 } from "../src/player";
 import type { Track } from "../src/types";
 
@@ -20,6 +22,22 @@ describe("jumpQueue", () => {
   it("rejects indexes outside the visible queue range", () => {
     expect(() => jumpQueue([track("1")], 0)).toThrow("between 1 and 1");
     expect(() => jumpQueue([track("1")], 2)).toThrow("between 1 and 1");
+  });
+});
+
+describe("removeFromQueue", () => {
+  it("removes the selected queued track and preserves the rest", () => {
+    const queue = [track("1"), track("2"), track("3")];
+
+    const result = removeFromQueue(queue, 2);
+
+    expect(result.removed.title).toBe("Track 2");
+    expect(result.queue.map((item) => item.title)).toEqual(["Track 1", "Track 3"]);
+  });
+
+  it("rejects indexes outside the queue range", () => {
+    expect(() => removeFromQueue([track("1")], 0)).toThrow("between 1 and 1");
+    expect(() => removeFromQueue([track("1")], 2)).toThrow("between 1 and 1");
   });
 });
 
@@ -79,6 +97,17 @@ describe("GuildMusicPlayer controls", () => {
     expect(player.snapshot().paused).toBe(true);
     expect(player.resume()).toBe(true);
     expect(player.snapshot().paused).toBe(false);
+  });
+});
+
+describe("buildFfmpegArgs", () => {
+  it("normalizes loudness and preserves Discord-compatible PCM output", () => {
+    const args = buildFfmpegArgs("https://example.com/audio.webm");
+
+    expect(args).toContain("https://example.com/audio.webm");
+    expect(args).toContain("-af");
+    expect(args).toContain("loudnorm=I=-16:TP=-1.5:LRA=11:linear=false");
+    expect(args.slice(-7)).toEqual(["-f", "s16le", "-ar", "48000", "-ac", "2", "pipe:1"]);
   });
 });
 

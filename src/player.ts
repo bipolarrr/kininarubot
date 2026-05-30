@@ -149,6 +149,13 @@ export class GuildMusicPlayer {
     return result.target;
   }
 
+  remove(index: number): Track {
+    const result = removeFromQueue(this.queue, index);
+    this.queue = result.queue;
+    this.notifyStateChange();
+    return result.removed;
+  }
+
   async skip(): Promise<Track | undefined> {
     const skipped = this.current;
     if (!skipped && this.queue.length === 0) {
@@ -281,7 +288,7 @@ export class GuildMusicPlayer {
       channelId: channel.id,
       guildId: this.guildId,
       adapterCreator: channel.guild.voiceAdapterCreator,
-      selfDeaf: false,
+      selfDeaf: true,
       selfMute: false
     });
     this.connection.on("error", (error) => {
@@ -326,34 +333,9 @@ export class GuildMusicPlayer {
       if (version !== this.playbackVersion || this.stopped) {
         return;
       }
-      this.ffmpeg = spawn(
-        "ffmpeg",
-        [
-          "-hide_banner",
-          "-loglevel",
-          "error",
-          "-reconnect",
-          "1",
-          "-reconnect_streamed",
-          "1",
-          "-reconnect_delay_max",
-          "5",
-          "-i",
-          playableUrl,
-          "-analyzeduration",
-          "0",
-          "-f",
-          "s16le",
-          "-ar",
-          "48000",
-          "-ac",
-          "2",
-          "pipe:1"
-        ],
-        {
-          windowsHide: true
-        }
-      );
+      this.ffmpeg = spawn("ffmpeg", buildFfmpegArgs(playableUrl), {
+        windowsHide: true
+      });
 
       this.ffmpeg.once("error", (error) => {
         console.error(`Failed to start ffmpeg ${this.guildId}: ${error.message}`);
@@ -440,6 +422,33 @@ export function formatTrack(track: Track): string {
   return `${track.title}${channel} (${formatDuration(track.durationSeconds)}) - requested by ${track.requestedBy}`;
 }
 
+export function buildFfmpegArgs(playableUrl: string): string[] {
+  return [
+    "-hide_banner",
+    "-loglevel",
+    "error",
+    "-reconnect",
+    "1",
+    "-reconnect_streamed",
+    "1",
+    "-reconnect_delay_max",
+    "5",
+    "-i",
+    playableUrl,
+    "-analyzeduration",
+    "0",
+    "-af",
+    "loudnorm=I=-16:TP=-1.5:LRA=11:linear=false",
+    "-f",
+    "s16le",
+    "-ar",
+    "48000",
+    "-ac",
+    "2",
+    "pipe:1"
+  ];
+}
+
 export function jumpQueue(queue: Track[], index: number): { target: Track; queue: Track[] } {
   if (!Number.isInteger(index) || index < 1 || index > queue.length) {
     throw new Error(`Queue index must be between 1 and ${queue.length}.`);
@@ -449,6 +458,18 @@ export function jumpQueue(queue: Track[], index: number): { target: Track; queue
   return {
     target: queue[targetIndex],
     queue: queue.slice(targetIndex)
+  };
+}
+
+export function removeFromQueue(queue: Track[], index: number): { removed: Track; queue: Track[] } {
+  if (!Number.isInteger(index) || index < 1 || index > queue.length) {
+    throw new Error(`Queue index must be between 1 and ${queue.length}.`);
+  }
+
+  const targetIndex = index - 1;
+  return {
+    removed: queue[targetIndex],
+    queue: [...queue.slice(0, targetIndex), ...queue.slice(targetIndex + 1)]
   };
 }
 

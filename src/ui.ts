@@ -20,23 +20,41 @@ export type MusicPanelPayload = {
   >;
 };
 
+export type QueuePagePayload = {
+  embeds: APIEmbed[];
+  components: APIActionRowComponent<APIButtonComponent>[];
+};
+
+export type NoticePayload = {
+  embeds: APIEmbed[];
+};
+
+export type NoticeTone = "active" | "idle" | "problem";
+
+const QUEUE_PAGE_SIZE = 10;
+export const THEME_COLORS = {
+  active: 0x2f80ed,
+  idle: 0xf2f4f7,
+  problem: 0xe5484d
+} as const;
+
 export function buildMusicPanel(guildId: string, snapshot: QueueSnapshot): MusicPanelPayload {
   const embed = new EmbedBuilder()
-    .setTitle("Music Panel")
-    .setColor(snapshot.current ? 0x2f80ed : 0x6b7280)
+    .setTitle("Kininari Music")
+    .setColor(getPlaybackTone(snapshot) === "active" ? THEME_COLORS.active : THEME_COLORS.idle)
     .addFields(
       {
-        name: "Status",
+        name: "상태",
         value: buildStatus(snapshot),
         inline: true
       },
       {
-        name: "Repeat",
+        name: "반복",
         value: formatRepeatMode(snapshot.repeatMode),
         inline: true
       },
       {
-        name: "Queue",
+        name: "대기열",
         value: buildQueueSummary(snapshot.queue),
         inline: false
       }
@@ -45,14 +63,118 @@ export function buildMusicPanel(guildId: string, snapshot: QueueSnapshot): Music
 
   if (snapshot.current) {
     embed.setDescription(buildTrackDescription(snapshot.current));
+    const thumbnail = getYouTubeThumbnailUrl(snapshot.current);
+    if (thumbnail) {
+      embed.setThumbnail(thumbnail);
+    }
   } else {
-    embed.setDescription("Nothing is playing.");
+    embed.setDescription("**재생 중인 곡이 없어요.**\n`/play`로 곡을 추가해 주세요.");
   }
 
   return {
     embeds: [embed.toJSON()],
     components: buildPanelComponents(guildId, snapshot).map((row) => row.toJSON())
   };
+}
+
+export function buildQueuePage(
+  guildId: string,
+  userId: string,
+  snapshot: QueueSnapshot,
+  page: number
+): QueuePagePayload {
+  const totalPages = getQueuePageCount(snapshot.queue.length);
+  const safePage = clampPage(page, totalPages);
+  const start = safePage * QUEUE_PAGE_SIZE;
+  const visible = snapshot.queue.slice(start, start + QUEUE_PAGE_SIZE);
+
+  const embed = new EmbedBuilder()
+    .setTitle("대기열")
+    .setColor(getPlaybackTone(snapshot) === "active" ? THEME_COLORS.active : THEME_COLORS.idle)
+    .setDescription(buildQueuePageDescription(snapshot, visible, start))
+    .setFooter({
+      text: `페이지 ${safePage + 1}/${totalPages} · 대기열 ${snapshot.queue.length}곡`
+    });
+
+  return {
+    embeds: [embed.toJSON()],
+    components: [
+      new ActionRowBuilder<ButtonBuilder>()
+        .addComponents(
+          new ButtonBuilder()
+            .setCustomId(queueCustomId(guildId, userId, "prev", safePage))
+            .setLabel("Previous")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(safePage === 0),
+          new ButtonBuilder()
+            .setCustomId(queueCustomId(guildId, userId, "next", safePage))
+            .setLabel("Next")
+            .setStyle(ButtonStyle.Secondary)
+            .setDisabled(safePage >= totalPages - 1),
+          new ButtonBuilder()
+            .setCustomId(queueCustomId(guildId, userId, "close", safePage))
+            .setLabel("Close")
+            .setStyle(ButtonStyle.Danger)
+        )
+        .toJSON()
+    ]
+  };
+}
+
+export function buildNotice(
+  title: string,
+  description: string,
+  options: {
+    tone?: NoticeTone;
+    fields?: Array<{ name: string; value: string; inline?: boolean }>;
+  } = {}
+): NoticePayload {
+  const tone = options.tone ?? "idle";
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setColor(THEME_COLORS[tone])
+    .setDescription(description)
+    .setTimestamp(new Date());
+
+  if (options.fields?.length) {
+    embed.addFields(options.fields);
+  }
+
+  return { embeds: [embed.toJSON()] };
+}
+
+export function buildProblemNotice(message: string): NoticePayload {
+  return buildNotice("문제가 생겼어요", `**처리하지 못했어요.**\n${message}`, { tone: "problem" });
+}
+
+export function buildTrackNotice(
+  title: string,
+  track: Track,
+  options: {
+    tone?: NoticeTone;
+    fields?: Array<{ name: string; value: string; inline?: boolean }>;
+  } = {}
+): NoticePayload {
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setColor(THEME_COLORS[options.tone ?? "active"])
+    .setDescription(buildTrackDescription(track))
+    .setTimestamp(new Date());
+
+  const thumbnail = getYouTubeThumbnailUrl(track);
+  if (thumbnail) {
+    embed.setThumbnail(thumbnail);
+  }
+
+  if (options.fields?.length) {
+    embed.addFields(options.fields);
+  }
+
+  return { embeds: [embed.toJSON()] };
+}
+
+export function getPlaybackTone(snapshot: QueueSnapshot): NoticeTone {
+  return snapshot.current || snapshot.queue.length > 0 ? "active" : "idle";
 }
 
 function buildPanelComponents(
@@ -131,6 +253,15 @@ export function panelCustomId(guildId: string, action: string): string {
   return `music:${guildId}:${action}`;
 }
 
+export function queueCustomId(
+  guildId: string,
+  userId: string,
+  action: string,
+  page: number
+): string {
+  return `queue:${guildId}:${userId}:${page}:${action}`;
+}
+
 export function parsePanelCustomId(customId: string): { guildId: string; action: string } | undefined {
   const match = /^music:([^:]+):(.+)$/.exec(customId);
   if (!match) {
@@ -143,47 +274,129 @@ export function parsePanelCustomId(customId: string): { guildId: string; action:
   };
 }
 
-function buildStatus(snapshot: QueueSnapshot): string {
-  if (!snapshot.current) {
-    return "Idle";
+export function parseQueueCustomId(
+  customId: string
+): { guildId: string; userId: string; page: number; action: string } | undefined {
+  const match = /^queue:([^:]+):([^:]+):(\d+):(.+)$/.exec(customId);
+  if (!match) {
+    return undefined;
   }
 
-  return snapshot.paused ? "Paused" : "Playing";
+  return {
+    guildId: match[1],
+    userId: match[2],
+    page: Number.parseInt(match[3], 10),
+    action: match[4]
+  };
+}
+
+function buildStatus(snapshot: QueueSnapshot): string {
+  if (!snapshot.current) {
+    return "**대기 중**";
+  }
+
+  return snapshot.paused ? "**일시정지**" : "**재생 중**";
 }
 
 function buildTrackDescription(track: Track): string {
   const lines = [
-    `**${track.title}**`,
-    `Channel: ${track.channel ?? "unknown"}`,
-    `Length: ${formatDuration(track.durationSeconds)}`,
-    `Requested by: ${track.requestedBy}`
+    `### ${formatTrackLink(track)}`,
+    `**채널**: ${track.channel ?? "알 수 없음"}`,
+    `**길이**: \`${formatDuration(track.durationSeconds)}\``,
+    `**요청자**: ${track.requestedBy}`
   ];
   return lines.join("\n");
 }
 
 function buildQueueSummary(queue: Track[]): string {
   if (queue.length === 0) {
-    return "Queue is empty.";
+    return "**대기열이 비어 있어요.**\n`/play`로 곡을 추가해 주세요.";
   }
 
   const visible = queue.slice(0, 5).map((track, index) => {
-    return `${index + 1}. ${track.title} (${formatDuration(track.durationSeconds)})`;
+    return formatQueueLine(track, index + 1);
   });
   const remaining = queue.length - visible.length;
   if (remaining > 0) {
-    visible.push(`...and ${remaining} more`);
+    visible.push(`그리고 **${remaining}곡** 더 있어요.`);
   }
   return visible.join("\n");
+}
+
+function buildQueuePageDescription(
+  snapshot: QueueSnapshot,
+  visible: Track[],
+  start: number
+): string {
+  const lines: string[] = [];
+  if (snapshot.current) {
+    lines.push(`**지금 재생 중**: ${formatTrackLink(snapshot.current)}`);
+    lines.push("");
+  }
+
+  if (snapshot.queue.length === 0) {
+    lines.push("**대기열이 비어 있어요.**");
+    lines.push("`/play`로 곡을 추가해 주세요.");
+    return lines.join("\n");
+  }
+
+  lines.push(
+    ...visible.map((track, index) => {
+      return formatQueueLine(track, start + index + 1);
+    })
+  );
+  return lines.join("\n");
+}
+
+function getQueuePageCount(queueLength: number): number {
+  return Math.max(1, Math.ceil(queueLength / QUEUE_PAGE_SIZE));
+}
+
+function clampPage(page: number, totalPages: number): number {
+  if (!Number.isInteger(page) || page < 0) {
+    return 0;
+  }
+  return Math.min(page, totalPages - 1);
 }
 
 function formatRepeatMode(mode: RepeatMode): string {
   switch (mode) {
     case "one":
-      return "One track";
+      return "**한 곡 반복**";
     case "all":
-      return "All tracks";
+      return "**전체 반복**";
     case "off":
-      return "Off";
+      return "**꺼짐**";
+  }
+}
+
+function formatQueueLine(track: Track, index: number): string {
+  const channel = track.channel ? ` · ${track.channel}` : "";
+  return `**${index.toString().padStart(2, "0")}.** ${formatTrackLink(track)} · \`${formatDuration(track.durationSeconds)}\`${channel}`;
+}
+
+function formatTrackLink(track: Track): string {
+  return `[${escapeMarkdownLinkText(track.title)}](${track.webpageUrl})`;
+}
+
+function escapeMarkdownLinkText(value: string): string {
+  return value.replaceAll("[", "\\[").replaceAll("]", "\\]");
+}
+
+function getYouTubeThumbnailUrl(track: Track): string | undefined {
+  const id = getYouTubeVideoId(track.webpageUrl) ?? (/^[\w-]{11}$/.test(track.id) ? track.id : undefined);
+  return id ? `https://img.youtube.com/vi/${id}/hqdefault.jpg` : undefined;
+}
+
+function getYouTubeVideoId(value: string): string | undefined {
+  try {
+    const url = new URL(value);
+    if (url.hostname === "youtu.be") {
+      return url.pathname.slice(1).split("/")[0] || undefined;
+    }
+    return url.searchParams.get("v") ?? undefined;
+  } catch {
+    return undefined;
   }
 }
 

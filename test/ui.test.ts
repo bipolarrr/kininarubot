@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { buildMusicPanel, parsePanelCustomId } from "../src/ui";
+import {
+  buildMusicPanel,
+  buildProblemNotice,
+  buildQueuePage,
+  buildTrackNotice,
+  parsePanelCustomId,
+  parseQueueCustomId,
+  THEME_COLORS
+} from "../src/ui";
 import type { QueueSnapshot } from "../src/player";
 import type { Track } from "../src/types";
 
@@ -17,6 +25,9 @@ describe("buildMusicPanel", () => {
     expect(playbackButtons[2].disabled).toBe(true);
     expect(sessionButtons[0].label).toBe("Stop");
     expect(sessionButtons[0].disabled).toBe(true);
+    expect(payload.embeds[0].color).toBe(THEME_COLORS.idle);
+    expect(payload.embeds[0].fields?.map((field) => field.name)).toEqual(["상태", "반복", "대기열"]);
+    expect(payload.embeds[0].description).toContain("`/play`");
     expect(payload.components).toHaveLength(2);
   });
 
@@ -36,6 +47,7 @@ describe("buildMusicPanel", () => {
     expect(playbackButtons[1].disabled).toBe(false);
     expect(playbackButtons[3].label).toBe("Repeat One");
     expect(playbackButtons[3].style).toBe(1);
+    expect(payload.embeds[0].color).toBe(THEME_COLORS.active);
   });
 
   it("adds a queue select menu only when queued tracks exist", () => {
@@ -60,6 +72,69 @@ describe("parsePanelCustomId", () => {
       guildId: "guild-1",
       action: "repeat-one"
     });
+  });
+});
+
+describe("buildQueuePage", () => {
+  it("shows ten queued tracks per page with navigation controls", () => {
+    const payload = buildQueuePage(
+      "guild-1",
+      "user-1",
+      snapshot({ current: track("now"), queue: Array.from({ length: 12 }, (_, index) => track(String(index + 1))) }),
+      0
+    );
+    const description = payload.embeds[0].description ?? "";
+    const buttons = (payload.components[0] as any).components;
+
+    expect(description).toContain("지금 재생 중");
+    expect(description).toContain("**01.** [Track 1]");
+    expect(description).toContain("**10.** [Track 10]");
+    expect(description).not.toContain("**11.** [Track 11]");
+    expect(description).toContain("`3:00`");
+    expect(payload.embeds[0].footer?.text).toBe("페이지 1/2 · 대기열 12곡");
+    expect(buttons[0].disabled).toBe(true);
+    expect(buttons[1].disabled).toBe(false);
+    expect(buttons[2].label).toBe("Close");
+  });
+
+  it("clamps queue pages and parses queue custom ids", () => {
+    const payload = buildQueuePage(
+      "guild-1",
+      "user-1",
+      snapshot({ queue: Array.from({ length: 12 }, (_, index) => track(String(index + 1))) }),
+      5
+    );
+    const description = payload.embeds[0].description ?? "";
+    const buttons = (payload.components[0] as any).components;
+
+    expect(description).toContain("**11.** [Track 11]");
+    expect(payload.embeds[0].footer?.text).toBe("페이지 2/2 · 대기열 12곡");
+    expect(buttons[0].disabled).toBe(false);
+    expect(buttons[1].disabled).toBe(true);
+    expect(parseQueueCustomId(buttons[0].custom_id)).toEqual({
+      guildId: "guild-1",
+      userId: "user-1",
+      page: 1,
+      action: "prev"
+    });
+  });
+});
+
+describe("notice builders", () => {
+  it("uses red problem embeds", () => {
+    const payload = buildProblemNotice("문제 상황");
+
+    expect(payload.embeds[0].color).toBe(THEME_COLORS.problem);
+    expect(payload.embeds[0].description).toContain("처리하지 못했어요");
+    expect(payload.embeds[0].description).toContain("문제 상황");
+  });
+
+  it("uses active blue track embeds with markdown links", () => {
+    const payload = buildTrackNotice("재생 중", track("1"));
+
+    expect(payload.embeds[0].color).toBe(THEME_COLORS.active);
+    expect(payload.embeds[0].description).toContain("[Track 1](https://youtube.com/watch?v=1)");
+    expect(payload.embeds[0].description).toContain("**길이**: `3:00`");
   });
 });
 
