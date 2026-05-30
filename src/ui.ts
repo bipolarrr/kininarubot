@@ -40,7 +40,7 @@ export const THEME_COLORS = {
 
 export function buildMusicPanel(guildId: string, snapshot: QueueSnapshot): MusicPanelPayload {
   const embed = new EmbedBuilder()
-    .setTitle("Kininari Music")
+    .setTitle(snapshot.current ? "Now Playing" : "Music Panel")
     .setColor(getPlaybackTone(snapshot) === "active" ? THEME_COLORS.active : THEME_COLORS.idle)
     .addFields(
       {
