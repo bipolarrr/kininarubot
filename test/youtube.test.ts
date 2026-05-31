@@ -1,14 +1,27 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { TrackCandidate } from "../src/types";
+
+const execFileMock = vi.hoisted(() => vi.fn());
+
+vi.mock("node:child_process", () => ({
+  execFile: execFileMock
+}));
+
 import {
+  appendLyricsToSearchQuery,
   isLikelyUrl,
   isYouTubeUrl,
   pickBestCandidate,
-  resolveTrack,
-  scoreCandidate
+  rankCandidates,
+  resolveTrack
 } from "../src/youtube";
 
+type ExecFileCallback = (error: Error | null, stdout: string, stderr: string) => void;
+
 describe("youtube helpers", () => {
-  const requestedVariantMatchDelta = 132;
+  beforeEach(() => {
+    execFileMock.mockReset();
+  });
 
   it("detects YouTube URLs separately from search queries", () => {
     expect(isLikelyUrl("https://youtu.be/abc")).toBe(true);
@@ -17,389 +30,199 @@ describe("youtube helpers", () => {
     expect(isYouTubeUrl("https://example.com/watch?v=abc")).toBe(false);
   });
 
-  it("prefers official audio style candidates over covers", () => {
-    const official = {
-      title: "Artist - Song (Official Audio)",
-      channel: "Artist - Topic",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=official",
-      description: "Provided to YouTube by Example Label"
-    };
-    const cover = {
-      title: "Artist - Song cover lyrics",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=cover"
-    };
-
-    expect(scoreCandidate(official)).toBeGreaterThan(scoreCandidate(cover));
-    expect(pickBestCandidate([cover, official])).toBe(official);
+  it("adds lyrics to non-URL search queries unless lyrics are already requested", () => {
+    expect(appendLyricsToSearchQuery("artist song")).toBe("artist song lyrics");
+    expect(appendLyricsToSearchQuery(" artist song ")).toBe("artist song lyrics");
+    expect(appendLyricsToSearchQuery("artist song lyrics")).toBe("artist song lyrics");
+    expect(appendLyricsToSearchQuery("artist song lyric video")).toBe("artist song lyric video");
+    expect(appendLyricsToSearchQuery("artist song 가사")).toBe("artist song 가사");
   });
 
-  it("prefers audio releases over official music videos for normal song searches", () => {
-    const officialAudio = {
-      title: "Artist - Song (Official Audio)",
-      channel: "Artist - Topic",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=official-audio",
-      description: "Provided to YouTube by Example Label"
-    };
-    const officialMusicVideo = {
-      title: "Artist - Song [Official Music Video]",
-      channel: "Artist Official",
-      channel_is_verified: true,
-      duration: 240,
-      webpage_url: "https://youtube.com/watch?v=official-mv"
-    };
+  it("keeps candidates in yt-dlp order without score sorting", () => {
+    const first = candidate("Fan cover lyrics", "first");
+    const second = candidate("Official Audio", "second");
+    const third = candidate("Broadcast clip", "third");
 
-    expect(scoreCandidate(officialAudio, "artist song")).toBeGreaterThan(
-      scoreCandidate(officialMusicVideo, "artist song")
-    );
-    expect(pickBestCandidate([officialMusicVideo, officialAudio], "artist song")).toBe(
-      officialAudio
-    );
+    expect(rankCandidates([first, second, third], "artist song")).toEqual([
+      first,
+      second,
+      third
+    ]);
+    expect(pickBestCandidate([first, second, third], "artist song")).toBe(first);
   });
 
-  it("keeps official music videos competitive when the query asks for an MV", () => {
-    const officialAudio = {
-      title: "Artist - Song (Official Audio)",
-      channel: "Artist - Topic",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=official-audio",
-      description: "Provided to YouTube by Example Label"
-    };
-    const officialMusicVideo = {
-      title: "Artist - Song [Official Music Video]",
-      channel: "Artist Official",
-      channel_is_verified: true,
-      duration: 240,
-      webpage_url: "https://youtube.com/watch?v=official-mv"
-    };
+  it("filters candidates without a title or URL while preserving the remaining order", () => {
+    const first = candidate("First playable", "first");
+    const missingTitle = { webpage_url: "https://youtube.com/watch?v=missing-title" };
+    const missingUrl = { title: "Missing URL" };
+    const second = candidate("Second playable", "second");
 
-    expect(scoreCandidate(officialMusicVideo, "artist song mv")).toBeGreaterThan(
-      scoreCandidate(officialMusicVideo, "artist song")
-    );
-    expect(pickBestCandidate([officialAudio, officialMusicVideo], "artist song mv")).toBe(
-      officialMusicVideo
-    );
+    expect(rankCandidates([first, missingTitle, missingUrl, second])).toEqual([first, second]);
   });
 
-  it("penalizes FMV results more than official music videos", () => {
-    const officialMusicVideo = {
-      title: "Artist - Song [Official Music Video]",
-      channel: "Artist Official",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=official-mv"
-    };
-    const fmv = {
-      title: "[FMV] Artist - Song",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=fmv"
-    };
+  it("filters exact karaoke title blacklist phrases", () => {
+    const normal = candidate("Artist - Song 노래방에서", "normal");
+    const tj = candidate("Artist - Song TJ노래방", "tj");
+    const ky = candidate("Artist - Song KY 금영노래방", "ky");
+    const kyKaraoke = candidate("Artist - Song KY KARAOKE", "ky-karaoke");
+    const spacedTj = candidate("Artist - Song TJ 노래방", "spaced-tj");
+    const unspacedKy = candidate("Artist - Song KY금영노래방", "unspaced-ky");
+    const spacedKyKaraoke = candidate("Artist - Song KY  KARAOKE", "spaced-ky-karaoke");
 
-    expect(scoreCandidate(fmv, "artist song")).toBeLessThan(
-      scoreCandidate(officialMusicVideo, "artist song")
-    );
+    expect(rankCandidates([tj, normal, ky, kyKaraoke, spacedTj, unspacedKy, spacedKyKaraoke])).toEqual([
+      normal,
+      spacedTj,
+      unspacedKy,
+      spacedKyKaraoke
+    ]);
   });
 
-  it("keeps Korean title-matching FMVs below official Topic audio with translated titles", () => {
-    const officialTopic = {
-      title: "FIX THAT OPTIMISM",
-      channel: "Alfredo - Topic",
-      duration: 116,
-      webpage_url: "https://youtube.com/watch?v=official-topic",
-      description: "Provided to YouTube by FLUXUS"
-    };
-    const fmv = {
-      title: "[FMV] Alfredo - 긍정적 성격을 고쳐라",
-      channel: "Fan Channel",
-      duration: 66,
-      webpage_url: "https://youtube.com/watch?v=fmv"
-    };
+  it("filters search candidates longer than 10 minutes", () => {
+    const long = { ...candidate("Long mix", "long"), duration: 601 };
+    const exactlyTenMinutes = { ...candidate("Ten minute track", "ten-minutes"), duration: 600 };
+    const unknownDuration = { ...candidate("Unknown duration", "unknown"), duration: undefined };
 
-    expect(pickBestCandidate([fmv, officialTopic], "긍정적 성격을 고쳐라")).toBe(
-      officialTopic
+    expect(rankCandidates([long, exactlyTenMinutes, unknownDuration])).toEqual([
+      exactlyTenMinutes,
+      unknownDuration
+    ]);
+  });
+
+  it("resolves URL input directly without adding lyrics or using ytsearch", async () => {
+    execFileMock.mockImplementationOnce((_file, args: string[], ...rest: unknown[]) => {
+      const callback = getExecFileCallback(rest);
+      expect(args).toContain("https://youtu.be/direct");
+      callback(
+        null,
+        JSON.stringify({
+          id: "direct",
+          title: "Direct URL Track",
+          webpage_url: "https://youtu.be/direct"
+        }),
+        ""
+      );
+    });
+
+    const track = await resolveTrack("https://youtu.be/direct");
+
+    expect(track.title).toBe("Direct URL Track");
+    expect(execFileMock).toHaveBeenCalledTimes(1);
+    const args = execFileMock.mock.calls[0][1] as string[];
+    expect(args.some((arg) => arg.startsWith("ytsearch"))).toBe(false);
+    expect(args.join(" ")).not.toContain("lyrics");
+  });
+
+  it("rejects direct URL input longer than 10 minutes", async () => {
+    execFileMock.mockImplementationOnce((_file, _args: string[], ...rest: unknown[]) => {
+      const callback = getExecFileCallback(rest);
+      callback(
+        null,
+        JSON.stringify({
+          id: "long-url",
+          title: "Long URL Track",
+          duration: 601,
+          webpage_url: "https://youtu.be/long-url"
+        }),
+        ""
+      );
+    });
+
+    await expect(resolveTrack("https://youtu.be/long-url")).rejects.toThrow(
+      "Tracks longer than 10 minutes are not supported."
     );
   });
 
-  it("allows FMV results when the query asks for an FMV", () => {
-    const officialTopic = {
-      title: "Artist - Song",
-      channel: "Artist - Topic",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=official-topic",
-      description: "Provided to YouTube by Example Label"
-    };
-    const fmv = {
-      title: "[FMV] Artist - Song",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=fmv"
-    };
+  it("searches non-URL input with ytsearch20 and automatic lyrics", async () => {
+    mockSearchResults([candidate("Artist - Song lyrics", "lyrics")]);
+    mockPlayableUrl();
 
-    expect(scoreCandidate(fmv, "artist song fmv")).toBeGreaterThan(
-      scoreCandidate(fmv, "artist song")
-    );
-    expect(pickBestCandidate([officialTopic, fmv], "artist song fmv")).toBe(fmv);
+    const track = await resolveTrack("artist song");
+
+    expect(track.title).toBe("Artist - Song lyrics");
+    expect(searchArgument()).toBe("ytsearch20:artist song lyrics");
   });
 
-  it("relaxes variant penalties when the query asks for them", () => {
-    const remix = {
-      title: "Artist - Song rmx",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=rmx"
-    };
-    const spedUp = {
-      title: "Artist - Song sped up",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=sped"
-    };
+  it("does not duplicate lyrics for English or Korean lyrics queries", async () => {
+    mockSearchResults([candidate("Artist - Song lyrics", "lyrics")]);
+    mockPlayableUrl();
+    await resolveTrack("artist song lyrics");
+    expect(searchArgument()).toBe("ytsearch20:artist song lyrics");
 
-    expect(scoreCandidate(remix, "artist song rmx")).toBeGreaterThanOrEqual(
-      scoreCandidate(remix, "artist song") + requestedVariantMatchDelta
-    );
-    expect(scoreCandidate(spedUp, "artist song 빠른 버전")).toBeGreaterThan(
-      scoreCandidate(spedUp, "artist song")
-    );
+    execFileMock.mockReset();
+    mockSearchResults([candidate("Artist - Song 가사", "korean-lyrics")]);
+    mockPlayableUrl();
+    await resolveTrack("artist song 가사");
+    expect(searchArgument()).toBe("ytsearch20:artist song 가사");
   });
 
-  it("only lightly penalizes lyrics results for normal song searches", () => {
-    const plainUpload = {
-      title: "Artist - Song",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=plain"
-    };
-    const lyricsUpload = {
-      title: "Artist - Song lyrics",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=lyrics"
-    };
+  it("skips an unplayable first search result and returns the next playable candidate", async () => {
+    const unplayable = candidate("First result", "unplayable");
+    const playable = candidate("Second result", "playable");
+    mockSearchResults([unplayable, playable]);
+    mockPlayableUrlFailure();
+    mockPlayableUrl("https://audio.example/playable.opus");
 
-    expect(scoreCandidate(lyricsUpload, "artist song")).toBe(
-      scoreCandidate(plainUpload, "artist song") - 4
-    );
-    expect(scoreCandidate(lyricsUpload, "artist song lyrics")).toBeGreaterThan(
-      scoreCandidate(lyricsUpload, "artist song")
-    );
+    const track = await resolveTrack("artist song");
+
+    expect(track.title).toBe("Second result");
+    expect(execFileMock).toHaveBeenCalledTimes(3);
+    expect((execFileMock.mock.calls[1][1] as string[]).at(-1)).toBe(unplayable.webpage_url);
+    expect((execFileMock.mock.calls[2][1] as string[]).at(-1)).toBe(playable.webpage_url);
   });
 
-  it("hard-penalizes karaoke results", () => {
-    const karaokeTitles = [
-      "Artist - Song karaoke",
-      "Artist - Song 금영노래방",
-      "Artist - Song 금영 노래방",
-      "Artist - Song TJ노래방",
-      "Artist - Song KY노래방",
-      "Artist - Song KY 노래방",
-      "Artist - Song 노래방 버전",
-      "Artist - Song 노래방 version",
-      "Artist - Song 노래방 반주",
-      "Artist - Song 노래방 MR"
-    ];
+  it("handles anime theme-like input through normal search", async () => {
+    mockSearchResults([candidate("Hyouka OP lyrics", "hyouka-op")]);
+    mockPlayableUrl();
 
-    for (const title of karaokeTitles) {
-      expect(
-        scoreCandidate(
-          {
-            title,
-            channel: "Karaoke Channel",
-            duration: 210,
-            webpage_url: `https://youtube.com/watch?v=${encodeURIComponent(title)}`
-          },
-          "artist song karaoke"
-        )
-      ).toBe(-9999);
-    }
-  });
+    const track = await resolveTrack("빙과 op");
 
-  it("does not hard-penalize normal titles containing 노래방", () => {
-    const normalTitles = [
-      "장범준 - 노래방에서",
-      "Artist - 노래방을",
-      "Artist - 노래방에",
-      "Artist - 노래방이"
-    ];
-
-    for (const title of normalTitles) {
-      expect(
-        scoreCandidate({
-          title,
-          channel: "Music Channel",
-          duration: 210,
-          webpage_url: `https://youtube.com/watch?v=${encodeURIComponent(title)}`
-        })
-      ).not.toBe(-9999);
-    }
-  });
-
-  it("prefers a normal 노래방 title over a karaoke-company candidate", () => {
-    const normalSong = {
-      title: "장범준 - 노래방에서",
-      channel: "Music Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=normal-noraebang"
-    };
-    const karaokeCompany = {
-      title: "장범준 - 노래방에서 금영노래방",
-      channel: "Karaoke Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=kumyoung-noraebang"
-    };
-
-    expect(scoreCandidate(karaokeCompany, "장범준 노래방에서")).toBe(-9999);
-    expect(pickBestCandidate([karaokeCompany, normalSong], "장범준 노래방에서")).toBe(
-      normalSong
-    );
-  });
-
-  it("prefers the requested remix variant over the official original", () => {
-    const officialOriginal = {
-      title: "Artist - Song (Official Audio)",
-      channel: "Artist - Topic",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=official-original"
-    };
-    const animeRemix = {
-      title: "Artist - Song Anime Remix",
-      channel: "Remix Artist",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=anime-remix"
-    };
-
-    expect(scoreCandidate(animeRemix, "artist song anime remix")).toBeGreaterThan(
-      scoreCandidate(officialOriginal, "artist song anime remix")
-    );
-    expect(pickBestCandidate([officialOriginal, animeRemix], "artist song anime remix")).toBe(
-      animeRemix
-    );
-  });
-
-  it("prefers a title-matching unofficial track over a different official song by the same artist", () => {
-    const officialPopularSong = {
-      title: "Artist - Popular Song (Official Audio)",
-      channel: "Artist - Topic",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=popular"
-    };
-    const matchingUnofficialSong = {
-      title: "Artist - Unreleased Track",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=unreleased"
-    };
-
-    expect(scoreCandidate(matchingUnofficialSong, "artist unreleased track")).toBeGreaterThan(
-      scoreCandidate(officialPopularSong, "artist unreleased track")
-    );
-    expect(
-      pickBestCandidate(
-        [officialPopularSong, matchingUnofficialSong],
-        "artist unreleased track"
-      )
-    ).toBe(matchingUnofficialSong);
-  });
-
-  it("does not apply the title live penalty when the query asks for live", () => {
-    const livePerformance = {
-      title: "Artist - Song live",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=live-performance"
-    };
-
-    expect(scoreCandidate(livePerformance, "artist song live")).toBeGreaterThanOrEqual(
-      scoreCandidate(livePerformance, "artist song") + requestedVariantMatchDelta
-    );
-  });
-
-  it("penalizes fancam results unless the query asks for a fancam", () => {
-    const fancam = {
-      title: "Artist - Song 직캠",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=fancam"
-    };
-
-    expect(scoreCandidate(fancam, "artist song 직캠")).toBeGreaterThanOrEqual(
-      scoreCandidate(fancam, "artist song") + requestedVariantMatchDelta
-    );
-  });
-
-  it("keeps penalizing active livestreams even when the query asks for live", () => {
-    const livePerformance = {
-      title: "Artist - Song live",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=live-performance"
-    };
-    const activeLivestream = {
-      ...livePerformance,
-      webpage_url: "https://youtube.com/watch?v=active-livestream",
-      is_live: true
-    };
-
-    expect(scoreCandidate(activeLivestream, "artist song live")).toBe(
-      scoreCandidate(livePerformance, "artist song live") - 80
-    );
-  });
-
-  it("only penalizes long videos when they lack official signals", () => {
-    const officialLong = {
-      title: "Artist - Long Song (Official Audio)",
-      channel: "Artist - Topic",
-      duration: 1200,
-      webpage_url: "https://youtube.com/watch?v=official-long"
-    };
-    const unofficialLong = {
-      title: "Artist - Long Song",
-      channel: "Fan Channel",
-      duration: 1200,
-      webpage_url: "https://youtube.com/watch?v=unofficial-long"
-    };
-
-    expect(scoreCandidate(officialLong)).toBeGreaterThan(scoreCandidate(unofficialLong));
-  });
-
-  it("rejects low-scoring candidates when a minimum score is required", () => {
-    const unrelated = {
-      title: "Completely Different Clip",
-      channel: "Fan Channel",
-      duration: 210,
-      webpage_url: "https://youtube.com/watch?v=unrelated"
-    };
-
-    expect(pickBestCandidate([unrelated], "실지주 1기 op")).toBe(unrelated);
-    expect(pickBestCandidate([unrelated], "실지주 1기 op", { minimumScore: 45 })).toBeUndefined();
-  });
-
-  it("rejects anime theme requests while automatic theme search is disabled", async () => {
-    await expect(resolveTrack("빙과 op")).rejects.toThrow(
-      "애니 OP/ED 자동 검색은 잠시 꺼져 있습니다. 곡명이나 아티스트를 함께 입력해 주세요."
-    );
-  });
-
-  it("prefers a resolved official anime theme query over fan variants", () => {
-    const fanLyrics = {
-      title: "Classroom of the Elite OP Caste Room lyrics",
-      channel: "Fan Channel",
-      duration: 90,
-      webpage_url: "https://youtube.com/watch?v=lyrics"
-    };
-    const officialTopic = {
-      title: "ZAQ - Caste Room",
-      channel: "ZAQ - Topic",
-      duration: 270,
-      webpage_url: "https://youtube.com/watch?v=official",
-      description: "Provided to YouTube by Lantis"
-    };
-
-    expect(
-      pickBestCandidate([fanLyrics, officialTopic], '"Caste Room" "ZAQ" 실지주 OP official')
-    ).toBe(officialTopic);
+    expect(track.title).toBe("Hyouka OP lyrics");
+    expect(searchArgument()).toBe("ytsearch20:빙과 op lyrics");
   });
 });
+
+function candidate(title: string, id: string): TrackCandidate {
+  return {
+    id,
+    title,
+    channel: "Example Channel",
+    duration: 210,
+    webpage_url: `https://youtube.com/watch?v=${id}`
+  };
+}
+
+function mockSearchResults(entries: TrackCandidate[]): void {
+  execFileMock.mockImplementationOnce((_file, _args: string[], ...rest: unknown[]) => {
+    const callback = getExecFileCallback(rest);
+    callback(null, JSON.stringify({ entries }), "");
+  });
+}
+
+function mockPlayableUrl(url = "https://audio.example/track.opus"): void {
+  execFileMock.mockImplementationOnce((_file, _args: string[], ...rest: unknown[]) => {
+    const callback = getExecFileCallback(rest);
+    callback(null, `${url}\n`, "");
+  });
+}
+
+function mockPlayableUrlFailure(): void {
+  execFileMock.mockImplementationOnce((_file, _args: string[], ...rest: unknown[]) => {
+    const callback = getExecFileCallback(rest);
+    callback(new Error("not playable"), "", "");
+  });
+}
+
+function getExecFileCallback(args: unknown[]): ExecFileCallback {
+  const callback = args.at(-1);
+  if (typeof callback !== "function") {
+    throw new Error("execFile callback was not provided");
+  }
+  return callback as ExecFileCallback;
+}
+
+function searchArgument(): string | undefined {
+  const call = execFileMock.mock.calls.find(([, args]) =>
+    (args as string[]).some((arg) => arg.startsWith("ytsearch"))
+  );
+  return (call?.[1] as string[] | undefined)?.find((arg) => arg.startsWith("ytsearch"));
+}

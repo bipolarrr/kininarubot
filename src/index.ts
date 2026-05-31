@@ -9,6 +9,7 @@ import {
   type ChatInputCommandInteraction,
   type GuildTextBasedChannel,
   type InteractionReplyOptions,
+  type MessageComponentInteraction,
   type Message,
   type RepliableInteraction,
   type StringSelectMenuInteraction
@@ -30,6 +31,7 @@ import {
 import { resolveTrack } from "./youtube";
 
 const config = loadConfig();
+const NOTICE_AUTO_DISMISS_MS = 10_000;
 const panelChannelIds = new Map<string, string>();
 const panelMessages = new Map<string, Message>();
 const players = new MusicPlayerManager(config.idleDisconnectMs, (guildId) => {
@@ -97,7 +99,8 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
       };
       const result = await player.enqueue(track, voiceChannel);
       await updateMusicPanel(interaction.guildId);
-      await interaction.editReply(
+      await editReplyWithAutoDismiss(
+        interaction,
         buildTrackNotice(result.started ? "재생을 시작했어요" : "대기열에 추가했어요", track, {
           tone: "active",
           fields: result.started
@@ -120,7 +123,8 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
       const index = interaction.options.getInteger("index", true);
       const removed = player.remove(index);
       await updateMusicPanel(interaction.guildId);
-      await interaction.editReply(
+      await editReplyWithAutoDismiss(
+        interaction,
         buildTrackNotice("대기열에서 제거했어요", removed, {
           tone: getPlaybackTone(player.snapshot()),
           fields: [{ name: "제거한 번호", value: `\`${index}\``, inline: true }]
@@ -134,7 +138,8 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
       const index = interaction.options.getInteger("index", true);
       const target = await player.jump(index);
       await updateMusicPanel(interaction.guildId);
-      await interaction.editReply(
+      await editReplyWithAutoDismiss(
+        interaction,
         buildTrackNotice("선택한 곡으로 이동했어요", target, {
           tone: "active",
           fields: [{ name: "이동한 번호", value: `\`${index}\``, inline: true }]
@@ -151,7 +156,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
         return;
       }
       await updateMusicPanel(interaction.guildId);
-      await interaction.editReply(buildTrackNotice("곡을 넘겼어요", skipped, { tone: getPlaybackTone(player.snapshot()) }));
+      await editReplyWithAutoDismiss(interaction, buildTrackNotice("곡을 넘겼어요", skipped, { tone: getPlaybackTone(player.snapshot()) }));
       return;
     }
 
@@ -159,7 +164,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       player.stop();
       await updateMusicPanel(interaction.guildId);
-      await interaction.editReply(buildNotice("재생을 멈췄어요", "**대기열을 비우고 재생을 중단했어요.**", { tone: "idle" }));
+      await editReplyWithAutoDismiss(interaction, buildNotice("재생을 멈췄어요", "**대기열을 비우고 재생을 중단했어요.**", { tone: "idle" }));
       return;
     }
 
@@ -168,9 +173,9 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
       await updateMusicPanel(interaction.guildId);
       const nowSnapshot = player.snapshot();
       if (nowSnapshot.current) {
-        await interaction.editReply(buildTrackNotice("지금 재생 중", nowSnapshot.current, { tone: "active" }));
+        await editReplyWithAutoDismiss(interaction, buildTrackNotice("지금 재생 중", nowSnapshot.current, { tone: "active" }));
       } else {
-        await interaction.editReply(buildNotice("지금 재생 중인 곡이 없어요", "**대기열이 비어 있어요.**", { tone: "idle" }));
+        await editReplyWithAutoDismiss(interaction, buildNotice("지금 재생 중인 곡이 없어요", "**대기열이 비어 있어요.**", { tone: "idle" }));
       }
       return;
 
@@ -178,7 +183,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       player.leave();
       await updateMusicPanel(interaction.guildId);
-      await interaction.editReply(buildNotice("음성 채널에서 나갔어요", "**재생 세션을 정리했어요.**", { tone: "idle" }));
+      await editReplyWithAutoDismiss(interaction, buildNotice("음성 채널에서 나갔어요", "**재생 세션을 정리했어요.**", { tone: "idle" }));
       return;
     }
 
@@ -200,7 +205,7 @@ async function handleCommand(interaction: ChatInputCommandInteraction): Promise<
       }
 
       await publishPanel(channel as GuildTextBasedChannel);
-      await interaction.editReply(buildNotice("패널을 게시했어요", `**<#${channel.id}>** 채널에 뮤직 패널을 만들었어요.`, { tone: getPlaybackTone(player.snapshot()) }));
+      await editReplyWithAutoDismiss(interaction, buildNotice("패널을 게시했어요", `**<#${channel.id}>** 채널에 뮤직 패널을 만들었어요.`, { tone: getPlaybackTone(player.snapshot()) }));
       return;
     }
 
@@ -422,15 +427,16 @@ async function replySafely(
   };
   if (interaction.deferred || interaction.replied) {
     if ("isMessageComponent" in interaction && interaction.isMessageComponent()) {
-      await interaction.followUp(replyPayload).catch(() => undefined);
+      await followUpWithAutoDismiss(interaction, replyPayload);
       return;
     }
 
     const { flags: _flags, ...editPayload } = replyPayload;
-    await interaction.editReply(editPayload).catch(() => undefined);
+    await editReplyWithAutoDismiss(interaction, editPayload);
     return;
   }
   await interaction.reply(replyPayload).catch(() => undefined);
+  scheduleDeleteReply(interaction);
 }
 
 function normalizeReplyPayload(payload: NoticePayload | string): Omit<InteractionReplyOptions, "flags"> {
@@ -438,6 +444,34 @@ function normalizeReplyPayload(payload: NoticePayload | string): Omit<Interactio
     return buildProblemNotice(payload);
   }
   return payload;
+}
+
+async function editReplyWithAutoDismiss(
+  interaction: RepliableInteraction,
+  payload: NoticePayload | Omit<InteractionReplyOptions, "flags">
+): Promise<void> {
+  await interaction.editReply(payload).catch(() => undefined);
+  scheduleDeleteReply(interaction);
+}
+
+async function followUpWithAutoDismiss(
+  interaction: MessageComponentInteraction,
+  payload: InteractionReplyOptions
+): Promise<void> {
+  const message = await interaction.followUp(payload).catch(() => undefined);
+  if (!message) {
+    return;
+  }
+
+  setTimeout(() => {
+    void interaction.webhook.deleteMessage(message.id).catch(() => undefined);
+  }, NOTICE_AUTO_DISMISS_MS);
+}
+
+function scheduleDeleteReply(interaction: RepliableInteraction): void {
+  setTimeout(() => {
+    void interaction.deleteReply().catch(() => undefined);
+  }, NOTICE_AUTO_DISMISS_MS);
 }
 
 function formatRepeatNotice(mode: string): string {
